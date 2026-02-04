@@ -32,3 +32,4 @@ helm-scancentral-dast-scanner
 helm-scancentral-sast
 *.tgz
 fcli.env
+kind-config.yaml
