@@ -1,0 +1,51 @@
+# Set the following depending on what components you wish to install
+# Just leave blank/empty if you don't want to install the component
+INSTALL_LIM=1
+INSTALL_SSC=1
+INSTALL_SCSAST=
+INSTALL_SCDAST=
+INSTALL_SCDAST_SCANNER=
+# KIND settings - default to "max" or configure based on your memory
+KIND_MEM=16384
+KIND_CPUS=max
+# Default Signing Password (generate using `openssl rand -base64 32`)
+SIGNING_PASSWORD=_YOUR_SIGNING_PASSWORD_
+# Default SSC Admin User
+SSC_ADMIN_USER=admin
+SSC_ADMIN_PASSWORD=admin
+# DockerHub login credentials to fortifydocker organisation
+DOCKERHUB_USERNAME=_YOUR_DOCKERHUB_USERNAME_
+DOCKERHUB_PASSWORD=_YOUR_DOCKERHUB_PASSWORD_
+# Path to openssl on Windows - example when OpenSSL for Windows installed
+OPENSSL_PATH=C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe
+# Path to openssl on Linux
+#OPENSSL_PATH=/usr/bin/openssl
+# Version on ScanCentral to use
+SCANCENTRAL_VERSION=24.4
+# Fortify Demo App to create
+SSC_APP_NAME=FortifyDemoApp
+SSC_APP_VER_NAME=1.0
+# LIM configuration
+LIM_ADMIN_USER=limadm
+LIM_ADMIN_PASSWORD=_YOUR_LIM_PASSWORD_
+LIM_POOL_NAME=Default
+LIM_POOL_PASSWORD=_YOUR_LIM_PASSWORD_
+# Debricked Access Token
+DEBRICKED_ACCESS_TOKEN=_YOUR_DEBRICKED_ACCESS_TOKEN_
+# Version of Helm charts to ise
+LIM_HELM_VERSION=24.4.0-2
+SSC_HELM_VERSION=24.4.0-2
+SCSAST_HELM_VERSION=24.4.0-2
+SCDAST_HELM_VERSION=24.4.0-2
+SCDAST_SCANNER_HELM_VERSION=24.4.0-2
+MYSQL_HELM_VERSION=9.3.1
+POSTGRES_HELM_VERSION=11.9.0
+# The following values will be replaced by scripts
+LIM_URL=
+LIM_API_URL=
+SSC_URL=
+SCSAST_URL=
+SCDAST_API_URL=
+CLIENT_AUTH_TOKEN=
+WORKER_AUTH_TOKEN=
+SHARED_SECRET=
