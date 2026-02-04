@@ -1,45 +1,250 @@
 # Example script to start kind and install Fortify LIM, SSC and ScanCentral SAST/DAST
 
+[CmdletBinding()]
 # Parameters
 param (
-    [Parameter(Mandatory=$false, HelpMessage="Start and install the environment")]
+    [Parameter(Mandatory=$false, HelpMessage="Create a kind cluster and install the Fortify services specified")]
     [switch]$Startup,
     [Parameter(Mandatory=$false, HelpMessage="Stop (but do not delete) the kind cluster")]
     [switch]$Shutdown,
-    [Parameter(Mandatory=$false, HelpMessage="Cleanup: stop, delete cluster and remove certs")]
+    [Parameter(Mandatory=$false, HelpMessage="Stop and delete kind cluster and remove certificates and artifacts")]
     [switch]$Cleanup,
-    [Parameter(Mandatory=$false, HelpMessage="Show status (default)")]
+    [Parameter(Mandatory=$false, HelpMessage="Show status of kind cluster and Fortify services")]
     [switch]$Status,
-	[Parameter(Mandatory=$false, HelpMessage="Recreate certificates")]
+	[Parameter(Mandatory=$false, HelpMessage="Forcefully recreate certificates")]
     [switch]$RecreateCertificates,
-	[Parameter(Mandatory=$false, HelpMessage="Install LIM")]
-	[switch]$InstallLIM,
-	[Parameter(Mandatory=$false, HelpMessage="Install SSC")]
-	[switch]$InstallSSC,
-	[Parameter(Mandatory=$false, HelpMessage="Install SCSAST")]
-	[switch]$InstallSCSAST,
-	[Parameter(Mandatory=$false, HelpMessage="Install SCDAST")]
-	[switch]$InstallSCDAST,
-	[Parameter(Mandatory=$false, HelpMessage="Install SCDAST Scanner")]
-	[switch]$InstallSCDASTScanner
+	[Parameter(Mandatory=$false, HelpMessage="Show resolved configuration and exit")]
+	[switch]$WhatIfConfig,
+	[Parameter(Mandatory=$false, HelpMessage="Show this help and exit")]
+	[switch]$Help,
+	[Parameter(Mandatory=$false, HelpMessage="Services to install. One or more of: LIM, SSC, SCSAST, SCDAST, SCDASTScanner, All")]
+	[ValidateSet('LIM','SSC','SCSAST','SCDAST','SCDASTScanner','All')]
+	[string[]]$Services = @()
 )
 
-if ($InstallLIM)
+# Helper to determine whether a named service should be installed
+function ServiceSelected {
+    param([string]$Name)
+    if (-not $Services) { return $false }
+    return ($Services -contains 'All' -or $Services -contains $Name)
+}
+
+# Ensure Docker engine is available and running; exit with helpful message otherwise
+function Ensure-DockerRunning {
+	Progress "Checking Docker availability..."
+	$dockerOutput = & docker info 2>&1
+	if ($LASTEXITCODE -ne 0) {
+		Fail "Docker does not appear to be running or the Docker CLI is not available. Start Docker Desktop (or the Docker engine) and re-run this script.`nDocker error: $dockerOutput"
+	}
+}
+
+# Resolve config values: prefer environment variable of same name, otherwise fall back to existing variable
+function Resolve-ConfigValue {
+	param([string]$Name)
+	$envVal = $null
+	try { $envVal = Get-ChildItem env:$Name -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Value -ErrorAction SilentlyContinue } catch { $envVal = $null }
+	if (-not [string]::IsNullOrEmpty($envVal)) { return $envVal }
+
+	$var = Get-Variable -Name $Name -ErrorAction SilentlyContinue
+	if ($var) { return $var.Value }
+
+	return $null
+}
+
+# Display script help/usage
+function Show-Help {
+	Write-Host "" -ForegroundColor Yellow
+	Write-Host "demo.ps1 - Help" -ForegroundColor Cyan
+	Write-Host "Usage: .\demo.ps1 [-Startup] [-Shutdown] [-Cleanup] [-Status] [-RecreateCertificates] [-WhatIfConfig] [-Help] [-Services <list>] [-Debug] [-Verbose]" -ForegroundColor Green
+	Write-Host "" 
+	Write-Host "Options:" -ForegroundColor Cyan
+	Write-Host "  -Startup                : Create a kind cluster and install the Fortify services specified" 
+	Write-Host "  -Shutdown               : Stop (but do not delete) the kind cluster" 
+	Write-Host "  -Cleanup                : Stop and delete kind cluster and remove certificates and artifacts" 
+	Write-Host "  -Status                 : Show status of kind cluster and Fortify services" 
+	Write-Host "  -RecreateCertificates   : Forcefully recreate TLS certificates" 
+	Write-Host "  -WhatIfConfig           : Show resolved configuration (env / fortify.config) and exit" 
+	Write-Host "  -Help                   : Show this help and exit" 
+	Write-Host "  -Services <list>        : Comma-separated list of services to install. Values: LIM, SSC, SCSAST, SCDAST, SCDASTScanner, All" 
+	Write-Host "  -Debug                  : Show unmasked secret values in WhatIfConfig (for debugging only)" 
+	Write-Host "  -Verbose                : Show which environment variable names were checked for each key" 
+	Write-Host "" 
+	Write-Host "Examples:" -ForegroundColor Cyan
+	Write-Host "  .\demo.ps1 -Startup -Services LIM,SSC            # start cluster and install LIM and SSC" 
+	Write-Host "  .\demo.ps1 -Startup -Services All                # start cluster and install all services" 
+	Write-Host "  .\demo.ps1 -WhatIfConfig -Verbose -Debug         # show resolved config, list env names checked, unmasked" 
+	Write-Host ""
+}
+
+# Console helpers for colored progress messages (like deploy.ps1)
+function Fail([string]$msg) { Write-Error $msg; Exit 1 }
+function Info([string]$msg) { Write-Host $msg -ForegroundColor Cyan }
+function Progress([string]$msg) { Write-Host $msg -ForegroundColor Yellow }
+function Success([string]$msg) { Write-Host $msg -ForegroundColor Green }
+
+# Resolve common configuration keys from environment (preferred) or existing variables
+$ConfigKeys = @(
+	'LIM_ADMIN_USER','LIM_ADMIN_PASSWORD','LIM_POOL_NAME','LIM_POOL_PASSWORD',
+	'DOCKERHUB_USERNAME','DOCKERHUB_PASSWORD','CERTIFICATE_SIGNING_PASSWORD',
+	'SSC_ADMIN_USER','SSC_ADMIN_PASSWORD','DEBRICKED_TOKEN',
+	'LIM_HELM_VERSION','MYSQL_HELM_VERSION','SSC_HELM_VERSION','SCSAST_HELM_VERSION',
+	'POSTGRES_HELM_VERSION','SCDAST_HELM_VERSION','SCDAST_SCANNER_HELM_VERSION',
+	'OPENSSL_PATH','OPENSSL_WINDOWS_PATH','OPENSSL_LINUX_PATH',
+	'HOST_HTTP_PORT','HOST_HTTPS_PORT'
+)
+function Load-FortifyConfig {
+	$cfgPath = Join-Path $PSScriptRoot 'fortify.config'
+	if (-not (Test-Path $cfgPath)) { return }
+	$script:FortifyConfig = @{}
+	Get-Content $cfgPath | ForEach-Object {
+		$line = $_.Trim()
+		if (-not $line -or $line.StartsWith('#')) { return }
+		if ($line -match '^(.*?)=(.*)$') {
+			$k = $matches[1].Trim()
+			$v = $matches[2].Trim()
+			if ($v -eq '') { return }
+			# Set variable with same name as key
+			try { Set-Variable -Name $k -Value $v -Scope Script -ErrorAction SilentlyContinue } catch {}
+			# record in hashtable for fallback display
+			$script:FortifyConfig[$k] = $v
+			# Map common alternate names
+			if ($k -eq 'OPENSSL_PATH' -and -not (Get-Variable -Name 'OPENSSL' -Scope Script -ErrorAction SilentlyContinue)) {
+				Set-Variable -Name 'OPENSSL' -Value $v -Scope Script
+			}
+			if ($k -eq 'DEBRICKED_TOKEN' -and -not (Get-Variable -Name 'DEBRICKED_ACCESS_TOKEN' -Scope Script -ErrorAction SilentlyContinue)) {
+				Set-Variable -Name 'DEBRICKED_ACCESS_TOKEN' -Value $v -Scope Script
+			}
+		}
+	}
+}
+
+# Load fortify.config so variables are available as script vars
+Load-FortifyConfig
+
+foreach ($k in $ConfigKeys) {
+	$v = Resolve-ConfigValue $k
+	if ($v -ne $null) { Set-Variable -Name $k -Value $v -Scope Script }
+}
+
+# Import helper functions (Get-PodStatus, Wait-UntilPodStatus, etc.)
+$FortifyModule = Join-Path $PSScriptRoot 'modules\FortifyFunctions.psm1'
+if (Test-Path $FortifyModule) {
+	Import-Module $FortifyModule -Scope Global -Force
+} else {
+	Write-Host "Warning: helper module not found: $FortifyModule" -ForegroundColor Yellow
+}
+
+# Ensure $EnvFile has a sensible default and the file exists
+if (-not (Get-Variable -Name EnvFile -Scope Script -ErrorAction SilentlyContinue) -or [string]::IsNullOrEmpty($EnvFile)) {
+	$EnvFile = Join-Path $PSScriptRoot 'fortify.env'
+}
+if (-not (Test-Path -Path $EnvFile)) {
+	New-Item -Path $EnvFile -ItemType File -Force | Out-Null
+}
+
+# If user requested help, or no CLI options were provided, show help and exit
+if ($Help.IsPresent -or ($PSBoundParameters.Count -eq 0)) {
+    Show-Help
+    exit 0
+}
+
+# Choose platform-specific OpenSSL path if provided
+$runningOnWindows = $false
+if ($env:OS -and $env:OS -ieq 'Windows_NT') { $runningOnWindows = $true }
+
+if ($runningOnWindows) {
+	$osOpenSsl = Resolve-ConfigValue 'OPENSSL_WINDOWS_PATH'
+	if (-not $osOpenSsl) { $osOpenSsl = Resolve-ConfigValue 'OPENSSL_PATH' }
+} else {
+	$osOpenSsl = Resolve-ConfigValue 'OPENSSL_LINUX_PATH'
+	if (-not $osOpenSsl) { $osOpenSsl = Resolve-ConfigValue 'OPENSSL_PATH' }
+}
+if ($osOpenSsl) { Set-Variable -Name 'OPENSSL' -Value $osOpenSsl -Scope Script }
+
+# Support -WhatIfConfig: display resolved configuration and exit (masked)
+if ($WhatIfConfig.IsPresent) {
+	# Determine whether to show unmasked values (user passed -Debug or debug preference enabled)
+	$ShowUnmasked = $false
+	if ($PSBoundParameters.ContainsKey('Debug') -or $DebugPreference -ne 'SilentlyContinue') { $ShowUnmasked = $true }
+
+	function MaskVal([string]$name, [object]$val) {
+		if (-not $val) { return '<not set>' }
+		if ($ShowUnmasked) { return $val }
+		$lower = $name.ToLower()
+		if ($lower -like '*pass*' -or $lower -like '*secret*' -or $lower -like '*token*') { return '****(masked)' }
+		return $val
+	}
+
+	$showKeys = @()
+	$showKeys += $ConfigKeys
+	# Ensure host port keys are included in WhatIfConfig
+	$showKeys += @('HOST_HTTP_PORT','HOST_HTTPS_PORT')
+
+	$report = @()
+	foreach ($k in $showKeys | Sort-Object -Unique) {
+		# prefer env var
+		$envVal = (Get-Item -Path "Env:\$k" -ErrorAction SilentlyContinue).Value
+		$src = $null
+		$val = $null
+		if ($envVal -and $envVal -ne '') { $val = $envVal; $src = "env:$k" }
+		else {
+			# check script variable
+			$gv = Get-Variable -Name $k -Scope Script -ErrorAction SilentlyContinue
+			if ($gv) { $val = $gv.Value; $src = 'script' }
+			# fallback to fortify.config parsed values
+			if (-not $val -and $script:FortifyConfig -and $script:FortifyConfig.ContainsKey($k)) { $val = $script:FortifyConfig[$k]; $src = 'fortify.config' }
+		}
+		if (-not $src) { $src = '<not set>' }
+
+		$display = MaskVal $k $val
+		$report += [PSCustomObject]@{ Key=$k; Value=$display; Source=$src }
+	}
+
+	Write-Host "=== Effective demo configuration (WhatIfConfig) ===" -ForegroundColor Yellow
+	$report | Format-Table -Property @{Label='Key';Expression={$_.Key}}, @{Label='Value';Expression={$_.Value}}, @{Label='Source';Expression={$_.Source}} -AutoSize
+	Write-Host "Note: keys containing 'pass', 'secret', or 'token' are masked." -ForegroundColor Yellow
+	# If verbose requested, show which environment variable names were checked for each key
+	if ($PSBoundParameters.ContainsKey('Verbose')) {
+		Write-Host "`nEnvironment variables checked (per key):" -ForegroundColor Yellow
+		# Alternate env names to check for certain keys
+		$alternate = @{ 'OPENSSL' = @('OPENSSL_PATH'); 'DEBRICKED_ACCESS_TOKEN' = @('DEBRICKED_TOKEN') }
+
+		foreach ($k in $showKeys | Sort-Object) {
+			$candidates = @()
+			$candidates += $k
+			if ($alternate.ContainsKey($k)) { $candidates += $alternate[$k] }
+
+			foreach ($envName in $candidates) {
+				if (-not $envName) { continue }
+				$e = Get-Item -Path "Env:\$envName" -ErrorAction SilentlyContinue
+				if ($e -and $e.Value -ne '') {
+					if ($ShowUnmasked) { $valShown = $e.Value } else { $valShown = MaskVal $k $e.Value }
+					Write-Host ('    {0,-25} -> {1, -40} (present)' -f $envName, $valShown) -ForegroundColor DarkGreen
+				} else {
+					Write-Host ('    {0,-25} -> {1, -40} (absent)' -f $envName, '<not set>') -ForegroundColor DarkGray
+				}
+			}
+		}
+	}
+	exit 0
+}
+
+if (ServiceSelected 'LIM')
 {
     if ([string]::IsNullOrEmpty($LIM_ADMIN_USER)) { throw "LIM_ADMIN_USER needs to be set in fortify.config" }
     if ([string]::IsNullOrEmpty($LIM_ADMIN_PASSWORD)) { throw "LIM_ADMIN_PASSWORD needs to be set in fortify.config" }
     if ([string]::IsNullOrEmpty($LIM_POOL_NAME)) { throw "LIM_POOL_NAME needs to be set in fortify.config" }
     if ([string]::IsNullOrEmpty($LIM_POOL_PASSWORD)) { throw "LIM_POOL_PASSWORD needs to be set in fortify.config" }
 }
-if ($InstallSSC)
+if (ServiceSelected 'SSC')
 {
     # any other required SSC settings
 }
-if ($InstallSCSAST)
+if (ServiceSelected 'SCSAST')
 {
     # any other required SCSAST settings
 }
-if ($InstallSCDAST)
+if (ServiceSelected 'SCDAST')
 {
     #if ([string]::IsNullOrEmpty($LIM_API_URL)) { throw "LIM_API_URL needs to be set in fortify.config" }
     if ([string]::IsNullOrEmpty($LIM_ADMIN_USER)) { throw "LIM_ADMIN_USER needs to be set in fortify.config" }
@@ -47,12 +252,15 @@ if ($InstallSCDAST)
     if ([string]::IsNullOrEmpty($LIM_POOL_NAME)) { throw "LIM_POOL_NAME needs to be set in fortify.config" }
     if ([string]::IsNullOrEmpty($LIM_POOL_PASSWORD)) { throw "LIM_POOL_PASSWORD needs to be set in fortify.config" }
 }
-if ($InstallSCDASTScanner)
+if (ServiceSelected 'SCDASTScanner')
 {
     # any other required SCDAST Scanner settings
 }
 
 # check if kind cluster is running
+# Verify Docker is running before invoking kind
+Ensure-DockerRunning
+
 $KindClusterName = "fortify-demo"
 $KindClusters = (kind get clusters)
 
@@ -74,14 +282,17 @@ $InternalHttpsPort = 443
 $SSCInternalUrl = "https://ssc-service:$InternalHttpsPort"
 
 # Host ports mapped by kind (hostPort -> containerPort)
-$HostHttpPort = 8080
-$HostHttpsPort = 8443
+# Allow overriding via HOST_HTTP_PORT and HOST_HTTPS_PORT (env or fortify.config)
+$cfgHostHttp = Resolve-ConfigValue 'HOST_HTTP_PORT'
+if ($cfgHostHttp -and $cfgHostHttp -ne '') { $HostHttpPort = [int]$cfgHostHttp } else { $HostHttpPort = 8080 }
+$cfgHostHttps = Resolve-ConfigValue 'HOST_HTTPS_PORT'
+if ($cfgHostHttps -and $cfgHostHttps -ne '') { $HostHttpsPort = [int]$cfgHostHttps } else { $HostHttpsPort = 8443 }
 
 & helm repo add bitnami https://charts.bitnami.com/bitnami 2>$null
 
 # Helper functions copied from startup.ps1
 function Show-Status {
-	Write-Host "Checking kind cluster and Fortify service status..."
+	Progress "Checking kind cluster and Fortify service status..."
 	$KindClusters = (kind get clusters) 2>$null
 	$isRunning = $false
 	if ($KindClusters -and ($KindClusters -contains $KindClusterName)) {
@@ -91,17 +302,17 @@ function Show-Status {
 		$allContainers = (& docker ps -a --filter "name=$KindClusterName" --format "{{.Names}}") 2>$null
 
 		if (-not $allContainers) {
-			Write-Host "kind cluster '$KindClusterName' not found (no containers)."
+			Info "kind cluster '$KindClusterName' not found (no containers)."
 			return
 		}
 
 		$isRunning = -not [string]::IsNullOrEmpty($runningContainer)
 		if ($isRunning) {
-			Write-Host "kind cluster '$KindClusterName' is running."
+			Success "kind cluster '$KindClusterName' is running."
 			& kubectl cluster-info --context "kind-$KindClusterName" 2>$null
 		}
 		else {
-			Write-Host "kind cluster '$KindClusterName' exists but control-plane container is STOPPED."
+			Write-Host "kind cluster '$KindClusterName' exists but control-plane container is STOPPED." -ForegroundColor Yellow
 		}
 	}
 	else {
@@ -110,7 +321,7 @@ function Show-Status {
 	}
 
 	# Show pod statuses for known Fortify components in a table
-	$services = @{
+	$knownServices = @{
 		LIM = 'lim-0';
 		SSC = 'ssc-webapp-0';
 		SCSAST = 'scancentral-sast-controller-0';
@@ -118,13 +329,63 @@ function Show-Status {
 		SCDAST_SCANNER = 'scancentral-dast-scanner-0'
 	}
 
-	$fmt = "{0,-18}{1,-36}{2,-12}"
-	Write-Host ""
-	Write-Host ($fmt -f 'Service', 'Pod', 'Status')
-	Write-Host ($fmt -f '-------', '---', '------')
+	# Determine which services to display: use provided -Services if present, otherwise show all
+	if ($Services -and $Services.Count -gt 0) {
+		$requested = $Services | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+		$showKeys = $requested | Where-Object { $knownServices.Keys -contains $_ }
+		if (-not $showKeys -or $showKeys.Count -eq 0) {
+			Write-Host "No matching services found for: $($requested -join ', ')" -ForegroundColor Yellow
+			return
+		}
+	}
+	else {
+		$showKeys = $services.Keys
+	}
 
-	foreach ($k in $services.Keys) {
-		$pod = $services[$k]
+	function Get-PodInfo {
+		param([string]$PodName)
+		# Try default namespace first
+		try {
+			$out = & kubectl get pod $PodName -n default -o jsonpath='{.metadata.name}||{.metadata.namespace}||{.status.podIP}' 2>$null
+			if ($LASTEXITCODE -eq 0 -and $out) {
+				$parts = $out -split '\|\|'
+				return [PSCustomObject]@{ Name=$parts[0]; Namespace=$parts[1]; PodIP=$parts[2] }
+			}
+		} catch {}
+
+		# Try current namespace / context
+		try {
+			$out = & kubectl get pod $PodName -o jsonpath='{.metadata.name}||{.metadata.namespace}||{.status.podIP}' 2>$null
+			if ($LASTEXITCODE -eq 0 -and $out) {
+				$parts = $out -split '\|\|'
+				return [PSCustomObject]@{ Name=$parts[0]; Namespace=$parts[1]; PodIP=$parts[2] }
+			}
+		} catch {}
+
+		# Fallback: search all namespaces for exact or prefix match
+		try {
+			$json = & kubectl get pods --all-namespaces -o json 2>$null
+			if ($json) {
+				$j = $json | ConvertFrom-Json
+				foreach ($item in $j.items) {
+					if ($item.metadata.name -eq $PodName -or $item.metadata.name.StartsWith($PodName)) {
+						return [PSCustomObject]@{ Name=$item.metadata.name; Namespace=$item.metadata.namespace; PodIP=$item.status.podIP }
+					}
+				}
+			}
+		} catch {}
+
+		return [PSCustomObject]@{ Name=$PodName; Namespace=''; PodIP='' }
+	}
+
+	$fmt = "{0,-14}{1,-28}{2,-12}{3,-16}{4,-12}"
+	Write-Host ""
+	Write-Host ($fmt -f 'Service', 'Pod', 'Namespace', 'Pod IP', 'Status')
+	Write-Host ($fmt -f '-------', '---', '---------', '------', '------')
+
+	foreach ($k in $showKeys) {
+		$pod = $knownServices[$k]
+		$podInfo = Get-PodInfo -PodName $pod
 		if ($isRunning) {
 			$status = $null
 			try { $status = Get-PodStatus -PodName $pod -ErrorAction Stop } catch { $status = $null }
@@ -133,20 +394,20 @@ function Show-Status {
 		else {
 			$status = 'Cluster stopped'
 		}
-		Write-Host ($fmt -f $k, $pod, $status)
+		Write-Host ($fmt -f $k, $podInfo.Name, $podInfo.Namespace, $podInfo.PodIP, $status)
 	}
 
-	# Display external URLs
+	# Display external URLs only for the services requested (or all if none requested)
 	Write-Host ""
 	Write-Host "External URLs (use host ports if configured):"
-	if ($LIMUrl) { Write-Host "  LIM:        https://$($LIMUrl):$($HostHttpsPort)" }
-	if ($SSCUrl) { Write-Host "  SSC:        https://$($SSCUrl):$($HostHttpsPort)" }
-	if ($SCSASTUrl) { Write-Host "  SCSAST:     https://$($SCSASTUrl):$($HostHttpsPort)/scancentral-ctrl" }
-	if ($SCDASTAPIUrl) { Write-Host "  SCDAST API: https://$($SCDASTAPIUrl):$($HostHttpsPort)" }
+	if ($showKeys -contains 'LIM' -and $LIMUrl) { Write-Host "  LIM:        https://$($LIMUrl):$($HostHttpsPort)" }
+	if ($showKeys -contains 'SSC' -and $SSCUrl) { Write-Host "  SSC:        https://$($SSCUrl):$($HostHttpsPort)" }
+	if ($showKeys -contains 'SCSAST' -and $SCSASTUrl) { Write-Host "  SCSAST:     https://$($SCSASTUrl):$($HostHttpsPort)/scancentral-ctrl" }
+	if ($showKeys -contains 'SCDAST' -and $SCDASTAPIUrl) { Write-Host "  SCDAST API: https://$($SCDASTAPIUrl):$($HostHttpsPort)" }
 }
 
 function Do-Shutdown {
-	Write-Host "Stopping kind cluster containers (will not delete the cluster)..."
+	Progress "Stopping kind cluster containers (will not delete the cluster)..."
 	$containers = (& docker ps -aq --filter "name=$KindClusterName") 2>$null
 	if ($containers) {
 		foreach ($c in $containers) { & docker stop $c | Out-Null; Write-Host "Stopped container $c" }
@@ -155,13 +416,13 @@ function Do-Shutdown {
 }
 
 function Do-Cleanup {
-	Write-Host "Cleaning up kind cluster and artifacts..."
+	Progress "Cleaning up kind cluster and artifacts..."
 
 	# Stop any running containers for the cluster
 	$containers = (& docker ps -aq --filter "name=$KindClusterName") 2>$null
 	if ($containers) {
-		Write-Host "Stopping containers..."
-		foreach ($c in $containers) { & docker stop $c | Out-Null; Write-Host "Stopped container $c" }
+		Info "Stopping containers..."
+		foreach ($c in $containers) { & docker stop $c | Out-Null; Info "Stopped container $c" }
 	}
 	else {
 		Write-Host "No running KIND containers found for '$KindClusterName'."
@@ -170,7 +431,7 @@ function Do-Cleanup {
 	# Delete kind cluster if it exists
 	$KindClustersNow = (kind get clusters) 2>$null
 	if ($KindClustersNow -and ($KindClustersNow -contains $KindClusterName)) {
-		Write-Host "Deleting cluster \"$KindClusterName\" ..."
+		Progress "Deleting cluster \"$KindClusterName\" ..."
 		& kind delete cluster --name $KindClusterName
 	}
 	else {
@@ -180,7 +441,7 @@ function Do-Cleanup {
 	# Remove certificates directory if present
 	$CertDir = Join-Path $PSScriptRoot -ChildPath "certificates"
 	if (Test-Path $CertDir) {
-		Write-Host "Removing certificates directory: $CertDir"
+		Info "Removing certificates directory: $CertDir"
 		Remove-Item -LiteralPath $CertDir -Force -Recurse
 	}
 	else { Write-Host "Certificates directory not present. Skipping." }
@@ -188,21 +449,21 @@ function Do-Cleanup {
 	# Remove ssc-secret dir if present
 	$SSCSecretDir = Join-Path $PSScriptRoot -ChildPath "ssc-secret"
 	if (Test-Path $SSCSecretDir) {
-		Write-Host "Removing SSC secret directory: $SSCSecretDir"
+		Info "Removing SSC secret directory: $SSCSecretDir"
 		Remove-Item -LiteralPath $SSCSecretDir -Force -Recurse
 	}
 	else { Write-Host "SSC secret directory not present. Skipping." }
 
-	Write-Host "Cleanup complete."
+	Success "Cleanup complete."
 }
 function Do-Startup {
 	if ($KindClusters -contains $KindClusterName)
     {
-        Write-Host "kind cluster '$KindClusterName' is running ..."
+		Success "kind cluster '$KindClusterName' is running ..."
     }
     else
     {
-        Write-Host "kind cluster '$KindClusterName' not running ... creating ..."
+		Progress "kind cluster '$KindClusterName' not running ... creating ..."
         
             # Create kind cluster with ingress support
             # Use a preconfigured kind config file checked into the repository
@@ -252,15 +513,94 @@ function Do-Startup {
 
 		Set-Location $CertDir
 
-		& "$OPENSSL" req -newkey rsa:2048 -nodes -keyout key.pem -x509 -days 3650 -out certificate.pem -subj $CertUrl
-		& "$OPENSSL" x509 -inform PEM -in certificate.pem -outform DER -out certificate.cer
-		& "$OPENSSL" pkcs12 -export -name ssc -in certificate.pem -inkey key.pem -out keystore.p12 -password pass:changeit
-		& "$OPENSSL" pkcs12 -export -name lim -in certificate.pem -inkey key.pem -out certificate.pfx -password pass:changeit
+		# Prefer mkcert when available (creates a locally-trusted CA and certs)
+		$mkcert = Get-Command mkcert -ErrorAction SilentlyContinue
+		if ($mkcert) {
+			Write-Host "mkcert found - creating locally-trusted certificate..."
+			# Ensure local CA is installed
+			& mkcert -install
 
-		& kubectl create secret tls wildcard-certificate --cert=certificate.pem --key=key.pem
+			# Hostnames to include (wildcard + specific service hostnames)
+			$wildcard = "*.$( $KindIP.Replace('.','-') ).nip.io"
+			$hosts = @($LIMUrl, $SSCUrl, $SCSASTUrl, $SCDASTAPIUrl, $wildcard)
 
-		& keytool -importkeystore -destkeystore ssc-service.jks -srckeystore keystore.p12 -srcstoretype pkcs12 -alias ssc -srcstorepass changeit -deststorepass changeit
-		& keytool -import -trustcacerts -file certificate.pem -alias "wildcard-cert" -keystore truststore -storepass changeit -noprompt
+			# Create cert and key
+			& mkcert -cert-file certificate.pem -key-file key.pem $hosts
+
+			# Create kubernetes TLS secret
+			kubectl delete secret wildcard-certificate --ignore-not-found
+			kubectl create secret tls wildcard-certificate --cert=certificate.pem --key=key.pem
+
+			# Create PKCS12 keystore and PFX for services that expect them
+			if ($OPENSSL) {
+				& "$OPENSSL" pkcs12 -export -name ssc -in certificate.pem -inkey key.pem -out keystore.p12 -password pass:changeit
+				& "$OPENSSL" pkcs12 -export -name lim -in certificate.pem -inkey key.pem -out certificate.pfx -password pass:changeit
+			} else {
+				Write-Host "Warning: OPENSSL not set - skipping pkcs12/pfx generation" -ForegroundColor Yellow
+			}
+
+			# Import keystore into Java keystore for SSC and create truststore from mkcert root CA
+			if (Test-Path keystore.p12) {
+				& keytool -importkeystore -destkeystore ssc-service.jks -srckeystore keystore.p12 -srcstoretype pkcs12 -alias ssc -srcstorepass changeit -deststorepass changeit
+			}
+
+			# Import mkcert root CA into truststore so Java trusts services
+			try {
+				$caroot = (& mkcert -CAROOT).Trim()
+				$carootCert = Join-Path $caroot 'rootCA.pem'
+				if (-not (Test-Path $carootCert)) { $carootCert = Join-Path $caroot 'rootCA.pem' }
+				if (Test-Path $carootCert) {
+					& keytool -import -trustcacerts -file $carootCert -alias mkcert-root -keystore truststore -storepass changeit -noprompt
+				} else {
+					Write-Host "mkcert CAROOT certificate not found at $carootCert" -ForegroundColor Yellow
+				}
+			} catch {
+				Write-Host "Failed to import mkcert root CA into truststore: $_" -ForegroundColor Yellow
+			}
+
+		}
+		else {
+			Write-Host "mkcert not found - generating SAN certificate with OpenSSL..."
+			# Create an OpenSSL config to include SANs
+			$opensslConf = @"
+[ req ]
+default_bits = 2048
+prompt = no
+default_md = sha256
+req_extensions = req_ext
+distinguished_name = dn
+
+[ dn ]
+CN = *.$( $KindIP.Replace('.','-') ).nip.io
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = *.$( $KindIP.Replace('.','-') ).nip.io
+DNS.2 = $LIMUrl
+DNS.3 = $SSCUrl
+DNS.4 = $SCSASTUrl
+DNS.5 = $SCDASTAPIUrl
+"@
+
+			$confPath = Join-Path $CertDir 'openssl-san.cnf'
+			$opensslConf | Out-File -FilePath $confPath -Encoding ascii
+
+			if (-not $OPENSSL) { Fail "OpenSSL path not configured (OPENSSL) - cannot create certificates." }
+
+			& "$OPENSSL" req -new -nodes -newkey rsa:2048 -keyout key.pem -out req.pem -config $confPath
+			& "$OPENSSL" x509 -req -days 3650 -in req.pem -signkey key.pem -out certificate.pem -extensions req_ext -extfile $confPath
+			& "$OPENSSL" x509 -inform PEM -in certificate.pem -outform DER -out certificate.cer
+			& "$OPENSSL" pkcs12 -export -name ssc -in certificate.pem -inkey key.pem -out keystore.p12 -password pass:changeit
+			& "$OPENSSL" pkcs12 -export -name lim -in certificate.pem -inkey key.pem -out certificate.pfx -password pass:changeit
+
+			kubectl delete secret wildcard-certificate --ignore-not-found
+			kubectl create secret tls wildcard-certificate --cert=certificate.pem --key=key.pem
+
+			& keytool -importkeystore -destkeystore ssc-service.jks -srckeystore keystore.p12 -srcstoretype pkcs12 -alias ssc -srcstorepass changeit -deststorepass changeit
+			& keytool -import -trustcacerts -file certificate.pem -alias "wildcard-cert" -keystore truststore -storepass changeit -noprompt
+		}
 
 		Set-Location $PSScriptRoot
 	}
@@ -276,7 +616,7 @@ function Do-Startup {
 	# License Infrastructure Manager (LIM)
 	#
 
-	if ($InstallLIM)
+	if (ServiceSelected 'LIM')
 	{
 		# check if LIM is already running
 		$LIMStatus = Get-PodStatus -PodName lim-0
@@ -302,7 +642,7 @@ function Do-Startup {
 			& kubectl delete secret lim-jwt-security-key --ignore-not-found
 			& kubectl create secret generic lim-jwt-security-key `
 				--type=Opaque `
-				--from-literal=token="$SIGNING_PASSWORD"
+				--from-literal=token="$CERTIFICATE_SIGNING_PASSWORD"
                 
 			& kubectl delete secret lim-server-certificate --ignore-not-found    
 			& kubectl create secret generic lim-server-certificate `
@@ -358,7 +698,7 @@ function Do-Startup {
 	# Software Security Center (SSC)
 	#
 
-	if ($InstallSSC)
+	if (ServiceSelected 'SSC')
 	{
 		# check if SSC is already running
 		$SSCStatus = Get-PodStatus -PodName ssc-webapp-0
@@ -443,7 +783,7 @@ function Do-Startup {
 	# ScanCentral SAST
 	#
 
-	if ($InstallSCSAST)
+	if (ServiceSelected 'SCSAST')
 	{
 		$SCSastControllerStatus = Get-PodStatus -PodName scancentral-sast-controller-0
 		if ($SCSastControllerStatus -eq "Running")
@@ -503,7 +843,7 @@ function Do-Startup {
 	# ScanCentral DAST
 	#
 
-	if ($InstallSCDAST)
+	if (ServiceSelected 'SCDAST')
 	{
 		$PostgresStatus = Get-PodStatus -PodName postgresql-0
 		if ($PostgresStatus -eq "Running")
@@ -554,7 +894,7 @@ function Do-Startup {
 			& kubectl delete secret scdast-service-token --ignore-not-found
 			& kubectl create secret generic scdast-service-token `
 				--type='opaque' `
-				--from-literal=service-token="$SIGNING_PASSWORD"
+				--from-literal=service-token="$CERTIFICATE_SIGNING_PASSWORD"
 
 			& kubectl delete secret scdast-ssc-serviceaccount --ignore-not-found
 			& kubectl create secret generic scdast-ssc-serviceaccount `
@@ -588,7 +928,7 @@ function Do-Startup {
 				--set imagePullSecrets[0].name=fortifydocker `
 				--set appsettings.lIMSettings.limUrl="$( $LIMInternalUrl )" `
 				--set appsettings.sSCSettings.sSCRootUrl="$( $SSCInternalUrl )" `
-				--set appsettings.debrickedSettings.accessToken="$( $DEBRICKED_ACCESS_TOKEN )" `
+				--set appsettings.debrickedSettings.accessToken="$( $DEBRICKED_TOKEN )" `
 				--set appsettings.dASTApiSettings.disableCorsOrigins=true `
 				--set appsettings.dASTApiSettings.corsOrigins[0]="=https://$( $SSCUrl )" `
 				--set appsettings.environmentSettings.allowNonTrustedServerCertificate=true `
@@ -628,7 +968,7 @@ function Do-Startup {
 	# ScanCentral DAST Scanner
 	#
 
-	if ($InstallSCDASTScanner)
+	if (ServiceSelected 'SCDASTScanner')
 	{
 		$SCDastScannerStatus = Get-PodStatus -PodName scancentral-dast-scanner-0
 		if ($SCDastScannerStatus -eq "Running")
@@ -677,4 +1017,5 @@ if ($Cleanup) {
 	return
 }
 
-Write-Host "No action requested. Use -Startup, -Shutdown, or -Status (default)."
+Show-Help
+exit 0

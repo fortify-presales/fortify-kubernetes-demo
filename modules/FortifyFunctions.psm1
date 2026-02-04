@@ -82,8 +82,29 @@ function Get-PodStatus
         [Parameter(Mandatory=$true)]
         [String]$PodName
     )
-    $Status = (kubectl get pods -n default $PodName -o jsonpath="{.status.phase}") 2>$null
-    return $Status
+    # Try explicit default namespace first
+    try {
+        $Status = (kubectl get pods -n default $PodName -o jsonpath="{.status.phase}") 2>$null
+        if (-not [string]::IsNullOrEmpty($Status)) { return $Status }
+    } catch {}
+
+    # Try current namespace (no -n) - respects current kubectl context/namespace
+    try {
+        $Status = (kubectl get pods $PodName -o jsonpath="{.status.phase}") 2>$null
+        if (-not [string]::IsNullOrEmpty($Status)) { return $Status }
+    } catch {}
+
+    # Fallback: search all namespaces for a pod whose name equals or starts with the provided name
+    try {
+        $json = (kubectl get pods --all-namespaces -o json) 2>$null
+        if ($json) {
+            $objs = $json | ConvertFrom-Json
+            $match = $objs.items | Where-Object { $_.metadata.name -eq $PodName -or $_.metadata.name -like "$PodName*" } | Select-Object -First 1
+            if ($match) { return $match.status.phase }
+        }
+    } catch {}
+
+    return $null
 }
 Export-ModuleMember Get-PodStatus
 
@@ -96,10 +117,10 @@ function Wait-UntilPodStatus
         [String]$UntilStatus = "Running"
     )
     $Status = $Null
-    Write-Host -n "Waiting unitl ${PodName} is ${UntilStatus} "
+    Write-Host -n "Waiting until ${PodName} is ${UntilStatus} "
     While ($Status -ne $UntilStatus)
     {
-        $Status = (kubectl get pods -n default $PodName -o jsonpath="{.status.phase}") 2>$null
+        $Status = Get-PodStatus -PodName $PodName
         Write-Host -n "."
         Start-Sleep -Seconds 5
     }

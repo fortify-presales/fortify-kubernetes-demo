@@ -35,3 +35,4 @@ helm-scancentral-sast
 fcli.env
 deploy.config
 deploy.ps1
+out.txt
