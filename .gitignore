@@ -20,6 +20,7 @@ gradle-app.setting
 # JDT-specific (Eclipse Java Development Tools)
 .classpath
 
+# Keep .env in gitignore for backwards compatibility, but prefer fortify.config
 .env
 fortify.license
 fortify.keys
@@ -32,4 +33,5 @@ helm-scancentral-dast-scanner
 helm-scancentral-sast
 *.tgz
 fcli.env
-kind-config.yaml
+deploy.config
+deploy.ps1

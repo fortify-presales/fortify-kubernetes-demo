@@ -1,9 +1,8 @@
-# Fortify KIND demo
+# Fortify Kubernetes IN Docker (kind) demo
 
-This repository contains some example scripts to setup a working Fortify demo environment using [KIND](https://kind.sigs.k8s.io/)
-and the [Fortify Helm Charts](https://github.com/fortify/helm3-charts). 
+This repository contains some example scripts to setup a working Fortify demo environment using [kind](https://kind.sigs.k8s.io/) and the [Fortify Helm Charts](https://github.com/fortify/helm3-charts). 
 
-KIND (Kubernetes IN Docker) is a tool for running local Kubernetes clusters using Docker container "nodes". 
+kind (Kubernetes IN Docker) is a tool for running local Kubernetes clusters using Docker container "nodes". 
 It is useful for developing and testing applications that are designed to run on Kubernetes.
 
 It includes a deployment of:
@@ -12,6 +11,12 @@ It includes a deployment of:
     [X] Fortify Software Security Center (SSC)
     [X] ScanCentral SAST and Linux Scanner/Sensor
     [X] ScanCentral DAST and Linux Scanner/Sensor
+
+## Documentation
+
+ - https://www.microfocus.com/documentation/fortify-software-security-center/2540/Deploying_SSC_in_Kubernetes_25.4.0.html
+ - https://www.microfocus.com/documentation/fortify-ScanCentral-DAST/2540/Deploying_ScanCentral_DAST_in_Kubernetes_25.4.0.html
+ - https://www.microfocus.com/documentation/fortify-software-security-center/2540/Deploying_SC_SAST_in_Kubernetes_25.4.0.html
 
 ## Prerequisites
 
@@ -32,7 +37,7 @@ Install **kubectl** by following: https://kubernetes.io/docs/tasks/tools/
 
 Install **helm** by following: https://helm.sh/docs/intro/install/
 
-### KIND
+### kind
 
 Install **kind** by following : https://kind.sigs.k8s.io/docs/user/quick-start/#installation
 
@@ -41,9 +46,10 @@ Install **kind** by following : https://kind.sigs.k8s.io/docs/user/quick-start/#
 You will need OpenSSL (https://www.openssl.org/) to create a self-signed wildcard certificate. You can install OpenSSL 
 using your OS package manager or use the version that is already available with the Git command line tool. If using Linux there is a good chance that OpenSSL is already installed.
 
+
 ### fortify.license file
 
-A working **fortify.license** file will be need for SSC and ScanCentral SAST.
+A working **fortify.license** file will be needed for SSC and ScanCentral SAST.
 Place this file in the "root" directory of this project.
 
 ### Dockerhub ***fortifydocker*** credentials
@@ -57,17 +63,11 @@ A working license for ScanCentral DAST and WebInspect will be needed if deployin
 
 ### Fortify Command Line utility
 
-The `fcli` tool can be used to populate data and connect to the Fortify KIND Environment.
+The `fcli` tool can be used to populate data and connect to the Fortify kind Environment.
 
 ## Environment preparation
 
-Copy the file `env-example` to `.env`, e.g.
-
-```
-cp env-example .env
-```
-
-then edit the file as required. Set the first few entries/flags depending on which components
+Edit `fortify.config` as required. Set the first few entries/flags depending on which components
 you wish to install. For example to install everything except ScanCentral DAST:
 
 ```
@@ -80,12 +80,12 @@ INSTALL_SCDAST=
 INSTALL_SCDAST_SCANNER=
 ```
 
-It is recommended to set the components incrementally so you can see what's going on and make sure things are working. For example: set just `INSTALL_LIM=1` first to install LIM and configure licenses then add `INSTALL_SSC=1` and so on. 
+It is recommended to set the components incrementally so you can see what's going on and make sure things are working. For example: set just `INSTALL_LIM=1` first to install LIM and configure licenses then add `INSTALL_SSC=1` and so on.
 
 Note: a ScanCentral DAST activation token needs to be installed in the LIM for the SecureBase database to be installed successfully.
 
-To save time, the startup scripts creates and uses the same certificates across all of the components.
-A single signing password is required and should be configured in the `.env` file:
+To save time, the startup scripts create and use the same certificates across all of the components.
+A single signing password is required and should be configured in the `fortify.config` file:
 
 ```
 SIGNING_PASSWORD=_YOUR_SIGNING_PASSWOD_
@@ -93,15 +93,15 @@ SIGNING_PASSWORD=_YOUR_SIGNING_PASSWOD_
 
 To generate your own signing password you can use the command `openssl rand -base64 32`.
 
-**Do not place the `.env` file in source control.**
+`fortify.config` is intended to be checked into the repository and used as the canonical configuration for these scripts.
 
 ## Install Fortify environment
 
-Run the following command to start KIND and create the Fortify Environment:
+Run the following command to start kind and create the Fortify Environment:
 
 ```
 pwsh 
-./startup.ps1
+./demo.ps1 -Startup
 ```
 
 It will take a while for everything to complete. If you want to see the progress and ensure everything
@@ -111,17 +111,28 @@ is starting correctly you can monitor the cluster using:
 kubectl get pods --watch
 ```
 
-Once the services have started they will be accessible on your local machine through the KIND cluster's 
-ingress controller at https://127.0.0.1 (or the various domain URLs configured in `.env`).
+Once the services have started they will be accessible on your local machine through the kind cluster's
+ingress controller. By default this repository maps kind host ports to non-privileged host ports to avoid
+Windows `http.sys` conflicts: host `8080` -> container `80`, and host `8443` -> container `443`.
+
+Access examples (adjust for your `.env` hostnames):
+
+- HTTP (container port 80) via host port 8080: http://127.0.0.1:8080
+- HTTPS (container port 443) via host port 8443: https://127.0.0.1:8443
+- Using nip.io hostnames (example): https://ssc.127-0-0-1.nip.io:8443
+
+If you prefer to bind directly to host ports 80/443 you can modify the `kind` config (requires freeing
+those ports on Windows and running PowerShell as Administrator), or map different host ports in the
+`kind-config.yaml` generated by `startup.ps1`.
 
 ## Installing Licenses in LIM
 
-Browse to [https://lim.127-0-0-1.nip.io](https://lim.127-0-0-1.nip.io) on your local machine and login using the 
+Browse to [https://lim.127-0-0-1.nip.io:8443](https://lim.127-0-0-1.nip.io:8443) on your local machine and login using the 
 values of `LIM_ADMIN_USER` and `LIM_ADMIN_PASSWORD` set in `.env`.
 
 ## Login to SSC
 
-Browse to https://ssc.127-0-0-1.nip.io on your local machine and login using the values of `SSC_ADMIN_USER` and
+Browse to https://ssc.127-0-0-1.nip.io:8443 on your local machine and login using the values of `SSC_ADMIN_USER` and
 `SSC_ADMIN_PASSWORD` set in `.env`.
 
 Note: if you want to keep the SSC "admin" user's default password of `admin` you can run the following commands to update the MySQL database before logging in:
@@ -147,7 +158,7 @@ kubectl delete pod ssc-webapp-0
 ```
 
 For ScanCentral DAST, you should use the "external" URL for the ScanCentral DAST API, e.g.
-`https://scdastapi.127-0-0-1.nip.io`. You will need to refresh your browser for the ScanCentral
+`https://scdastapi.127-0-0-1.nip.io:8443`. You will need to refresh your browser for the ScanCentral
 DAST view to appear.
 
 ## Populate environment
@@ -167,7 +178,7 @@ fcli ssc session logout
 
 ## Update environment
 
-You can re-run the `startup.ps1` script with different options set in the `.env` file to deploy additional Fortify components.
+You can re-run the `demo.ps1` script with different options set in the `fortify.config` file to deploy additional Fortify components.
 
 ## Example commands
 
@@ -184,26 +195,26 @@ Here are some additional kubernetes commands to help you:
 |View all pods                  | `kubectl get pods` |
 |View all services              | `kubectl get services` |
 
-## Stopping/Starting KIND
+## Stopping/Starting kind
 
-You can stop the KIND cluster using:
+You can stop the kind cluster using:
 
 ```
-docker stop fortify-demo-control-plane
+./demo.ps1 -Shutdown
 ```
 
 Note: this will keep the kubernetes cluster so that even after reboot of your machine you can restart the cluster with:
 
 ```
-docker start fortify-demo-control-plane
+./deo.ps1 -Startup
 ```
 
 You may need to restart the SSC pod once more after restarting the cluster.
 
 ## Remove Fortify environment
 
-If you wish to remove the KIND environment completely, you can use the following command:
+If you wish to remove the kind environment completely, you can use the following command:
 
 ```
-./shutdown.ps1
+./demo.ps1 -Cleanup
 ```

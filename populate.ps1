@@ -4,9 +4,13 @@ Write-Host "Fortify Population script"
 Import-Module $PSScriptRoot\modules\FortifyFunctions.psm1 -Scope Global -Force
 Set-PSPlatform
 
-# Import local environment specific settings
-$EnvSettings = $(ConvertFrom-StringData -StringData (Get-Content (Join-Path "." -ChildPath ".env") | Where-Object {-not ($_.StartsWith('#'))} | Out-String))
-$EnvFile = Join-Path $PSScriptRoot -ChildPath ".env"
+# Import local environment specific settings from fortify.config
+$ConfigPath = Join-Path $PSScriptRoot -ChildPath "fortify.config"
+if (-not (Test-Path $ConfigPath)) {
+	throw "fortify.config not found in repository root. Create fortify.config with required settings."
+}
+$EnvSettings = $(ConvertFrom-StringData -StringData (Get-Content $ConfigPath | Where-Object {-not ($_.StartsWith('#'))} | Out-String))
+$EnvFile = $ConfigPath
 
 $SSC_ADMIN_USER = $EnvSettings['SSC_ADMIN_USER']
 $SSC_ADMIN_PASSWORD = $EnvSettings['SSC_ADMIN_PASSWORD']
@@ -16,8 +20,8 @@ $CLIENT_AUTH_TOKEN = $EnvSettings['CLIENT_AUTH_TOKEN']
 
 if ([string]::IsNullOrEmpty($SSC_ADMIN_USER)) { $SSC_ADMIN_USER = "admin" }
 if ([string]::IsNullOrEmpty($SSC_ADMIN_PASSWORD)) { $SSC_ADMIN_PASSWORD = "admin" }
-if ([string]::IsNullOrEmpty($SCSAST_URL)) { throw "SCSAST_URL needs to be set in .env file" }
-if ([string]::IsNullOrEmpty($CLIENT_AUTH_TOKEN)) { throw "CLIENT_AUTH_TOKEN needs to be set in .env file" }
+if ([string]::IsNullOrEmpty($SCSAST_URL)) { throw "SCSAST_URL needs to be set in fortify.config" }
+if ([string]::IsNullOrEmpty($CLIENT_AUTH_TOKEN)) { throw "CLIENT_AUTH_TOKEN needs to be set in fortify.config" }
 
 
 $CertDir = "$($PSScriptRoot)\certificates"
