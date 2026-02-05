@@ -1,0 +1,53 @@
+{{- if .Values.init.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mssql-official.fullname" . }}-db-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ include "mssql-official.fullname" . }}-db-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: db-init
+          image: "{{ .Values.init.image.repository }}:{{ .Values.init.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            {{- $secret := .Values.init.secretName }}
+            {{- if not $secret }}
+            {{- $secret = printf "%s-secret" (include "mssql-official.fullname" .) }}
+            {{- end }}
+            - name: MSSQL_SA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: sa-password
+            - name: DB_NAME
+              value: "{{ .Values.init.database }}"
+            - name: DB_HOST
+              value: "mssql"
+            - name: DB_PORT
+              value: "{{ .Values.service.port }}"
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              # wait for service to be reachable
+              n=0
+              until /bin/bash -c "(echo > /dev/tcp/$DB_HOST/$DB_PORT) >/dev/null 2>&1"; do
+                n=$((n+1))
+                if [ $n -gt 60 ]; then
+                  echo "Timed out waiting for DB at $DB_HOST:$DB_PORT" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "DB reachable at $DB_HOST:$DB_PORT, creating database if not exists"
+              /opt/mssql-tools/bin/sqlcmd -S $DB_HOST,$DB_PORT -U sa -P "$MSSQL_SA_PASSWORD" -Q "IF DB_ID(N'$DB_NAME') IS NULL CREATE DATABASE [$DB_NAME];"
+      # Use host network not required; rely on cluster networking
+      terminationGracePeriodSeconds: 30
+{{- end }}

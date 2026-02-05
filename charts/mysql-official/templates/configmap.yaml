@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+data:
+  my.cnf: |-
+{{ $cfg := .Values.primary.configuration | default "" | replace "/opt/bitnami/mysql/tmp/mysqld.pid" "/var/run/mysqld/mysqld.pid" | replace "/opt/bitnami/mysql/tmp/mysql.sock" "/var/run/mysqld/mysqld.sock" | replace "/opt/bitnami/mysql/tmp" "/tmp" | replace "/opt/bitnami/mysql/logs" "/var/log/mysql" | replace "/opt/bitnami/mysql" "/var/lib/mysql" }}
+{{ $cfg | indent 4 }}

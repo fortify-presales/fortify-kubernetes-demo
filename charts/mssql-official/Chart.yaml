@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mssql-official
+description: A minimal Helm chart to deploy Microsoft SQL Server for demo purposes
+type: application
+version: 0.1.0
+appVersion: "2019-latest"

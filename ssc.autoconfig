@@ -2,13 +2,13 @@ appProperties:
   host.validation: false
 
 datasourceProperties:
-  db.username: root
-  db.password: password
+  db.username: sa
+  db.password: "ChangeMe123!"
 
-  jdbc.url: 'jdbc:mysql://mysql:3306/ssc_db?sessionVariables=collation_connection=latin1_general_cs&rewriteBatchedStatements=true'
+  jdbc.url: 'jdbc:sqlserver://mssql:1433;databaseName=ssc_db;encrypt=false;trustServerCertificate=true'
 
 dbMigrationProperties:
 
   migration.enabled: true
-  migration.username: root
-  migration.password: password
+  migration.username: sa
+  migration.password: "ChangeMe123!"

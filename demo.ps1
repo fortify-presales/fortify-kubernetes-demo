@@ -1,18 +1,67 @@
-# Example script to start kind and install Fortify LIM, SSC and ScanCentral SAST/DAST
+<#
+.SYNOPSIS
+   Create and manage a local kind (Kubernetes IN Docker) cluster and deploy Fortify components.
+
+.DESCRIPTION
+   This PowerShell script provisions a local kind cluster (with ingress), deploys Fortify
+   components (LIM, SSC, ScanCentral SAST/DAST) via Helm charts, manages TLS certificates,
+   and provides helper operations for starting, stopping, cleaning up, and checking status.
+
+   The script is intended to be run on Windows or Linux with PowerShell Core and requires
+   Docker, kubectl, helm, kind and OpenSSL (for certificate generation). It can also
+   optionally use mkcert to create a locally-trusted CA for development.
+
+.PARAMETER Start
+   Create/start the kind cluster and install the Fortify services specified via `-Services`.
+.PARAMETER Stop
+   Stop (but do not delete) the kind cluster. Containers are stopped so the cluster can be
+   restarted without rebuilding.
+
+.PARAMETER Delete
+   Delete the kind cluster and remove generated certificates and artifacts.
+
+.PARAMETER Status
+   Show status of the kind cluster and deployed Fortify services.
+
+.PARAMETER RecreateCertificates
+   Forcefully recreate TLS certificates, keystores and truststores used by the demo and
+   recreate the `ssc` secret if necessary.
+
+.PARAMETER AutoSyncCerts
+   When present the script will automatically detect differences between the local
+   `certificate.pem` and the cluster `wildcard-certificate` secret and sync them.
+
+.PARAMETER WhatIfConfig
+   Print the resolved configuration (env variables and fortify.config) and exit.
+
+.PARAMETER Services
+   Comma-separated list of services to install. Values: LIM, SSC, SCSAST, SCDAST, SCDASTScanner, All
+
+.EXAMPLE
+   .\demo.ps1 -Start -Services LIM,SSC
+
+.EXAMPLE
+   .\demo.ps1 -Delete
+
+.NOTES
+   See README.md for more usage details and prerequisites.
+#>
 
 [CmdletBinding()]
 # Parameters
 param (
-    [Parameter(Mandatory=$false, HelpMessage="Create a kind cluster and install the Fortify services specified")]
-    [switch]$Startup,
-    [Parameter(Mandatory=$false, HelpMessage="Stop (but do not delete) the kind cluster")]
-    [switch]$Shutdown,
-    [Parameter(Mandatory=$false, HelpMessage="Stop and delete kind cluster and remove certificates and artifacts")]
-    [switch]$Cleanup,
+	[Parameter(Mandatory=$false, HelpMessage="Create a kind cluster and install the Fortify services specified")]
+	[switch]$Start,
+	[Parameter(Mandatory=$false, HelpMessage="Stop (but do not delete) the kind cluster")]
+	[switch]$Stop,
+	[Parameter(Mandatory=$false, HelpMessage="Stop and delete kind cluster and remove certificates and artifacts")]
+	[switch]$Delete,
     [Parameter(Mandatory=$false, HelpMessage="Show status of kind cluster and Fortify services")]
     [switch]$Status,
 	[Parameter(Mandatory=$false, HelpMessage="Forcefully recreate certificates")]
     [switch]$RecreateCertificates,
+	[Parameter(Mandatory=$false, HelpMessage="Auto-detect and sync local certificates to cluster on startup (opt-in)")]
+	[switch]$AutoSyncCerts,
 	[Parameter(Mandatory=$false, HelpMessage="Show resolved configuration and exit")]
 	[switch]$WhatIfConfig,
 	[Parameter(Mandatory=$false, HelpMessage="Show this help and exit")]
@@ -55,12 +104,12 @@ function Resolve-ConfigValue {
 function Show-Help {
 	Write-Host "" -ForegroundColor Yellow
 	Write-Host "demo.ps1 - Help" -ForegroundColor Cyan
-	Write-Host "Usage: .\demo.ps1 [-Startup] [-Shutdown] [-Cleanup] [-Status] [-RecreateCertificates] [-WhatIfConfig] [-Help] [-Services <list>] [-Debug] [-Verbose]" -ForegroundColor Green
+	Write-Host "Usage: .\demo.ps1 [-Start] [-Stop] [-Delete] [-Status] [-RecreateCertificates] [-WhatIfConfig] [-Help] [-Services <list>] [-Debug] [-Verbose]" -ForegroundColor Green
 	Write-Host "" 
 	Write-Host "Options:" -ForegroundColor Cyan
-	Write-Host "  -Startup                : Create a kind cluster and install the Fortify services specified" 
-	Write-Host "  -Shutdown               : Stop (but do not delete) the kind cluster" 
-	Write-Host "  -Cleanup                : Stop and delete kind cluster and remove certificates and artifacts" 
+	Write-Host "  -Start                  : Create a kind cluster and install the Fortify services specified" 
+	Write-Host "  -Stop                   : Stop (but do not delete) the kind cluster" 
+	Write-Host "  -Delete                 : Stop and delete kind cluster and remove certificates and artifacts" 
 	Write-Host "  -Status                 : Show status of kind cluster and Fortify services" 
 	Write-Host "  -RecreateCertificates   : Forcefully recreate TLS certificates" 
 	Write-Host "  -WhatIfConfig           : Show resolved configuration (env / fortify.config) and exit" 
@@ -70,8 +119,8 @@ function Show-Help {
 	Write-Host "  -Verbose                : Show which environment variable names were checked for each key" 
 	Write-Host "" 
 	Write-Host "Examples:" -ForegroundColor Cyan
-	Write-Host "  .\demo.ps1 -Startup -Services LIM,SSC            # start cluster and install LIM and SSC" 
-	Write-Host "  .\demo.ps1 -Startup -Services All                # start cluster and install all services" 
+	Write-Host "  .\demo.ps1 -Start -Services LIM,SSC            # start cluster and install LIM and SSC" 
+	Write-Host "  .\demo.ps1 -Start -Services All                # start cluster and install all services" 
 	Write-Host "  .\demo.ps1 -WhatIfConfig -Verbose -Debug         # show resolved config, list env names checked, unmasked" 
 	Write-Host ""
 }
@@ -125,6 +174,8 @@ foreach ($k in $ConfigKeys) {
 	$v = Resolve-ConfigValue $k
 	if ($v -ne $null) { Set-Variable -Name $k -Value $v -Scope Script }
 }
+
+# Backwards compatibility: keep older logic using $Start/$Stop only
 
 # Import helper functions (Get-PodStatus, Wait-UntilPodStatus, etc.)
 $FortifyModule = Join-Path $PSScriptRoot 'modules\FortifyFunctions.psm1'
@@ -284,11 +335,9 @@ $SSCInternalUrl = "https://ssc-service:$InternalHttpsPort"
 # Host ports mapped by kind (hostPort -> containerPort)
 # Allow overriding via HOST_HTTP_PORT and HOST_HTTPS_PORT (env or fortify.config)
 $cfgHostHttp = Resolve-ConfigValue 'HOST_HTTP_PORT'
-if ($cfgHostHttp -and $cfgHostHttp -ne '') { $HostHttpPort = [int]$cfgHostHttp } else { $HostHttpPort = 8080 }
+if ($cfgHostHttp -and $cfgHostHttp -ne '') { $HostHttpPort = [int]$cfgHostHttp } else { $HostHttpPort = 80 }
 $cfgHostHttps = Resolve-ConfigValue 'HOST_HTTPS_PORT'
-if ($cfgHostHttps -and $cfgHostHttps -ne '') { $HostHttpsPort = [int]$cfgHostHttps } else { $HostHttpsPort = 8443 }
-
-& helm repo add bitnami https://charts.bitnami.com/bitnami 2>$null
+if ($cfgHostHttps -and $cfgHostHttps -ne '') { $HostHttpsPort = [int]$cfgHostHttps } else { $HostHttpsPort = 443 }
 
 # Helper functions copied from startup.ps1
 function Show-Status {
@@ -339,7 +388,7 @@ function Show-Status {
 		}
 	}
 	else {
-		$showKeys = $services.Keys
+		$showKeys = $knownServices.Keys
 	}
 
 	function Get-PodInfo {
@@ -378,7 +427,7 @@ function Show-Status {
 		return [PSCustomObject]@{ Name=$PodName; Namespace=''; PodIP='' }
 	}
 
-	$fmt = "{0,-14}{1,-28}{2,-12}{3,-16}{4,-12}"
+	$fmt = "{0,-16}{1,-30}{2,-12}{3,-16}{4,-12}"
 	Write-Host ""
 	Write-Host ($fmt -f 'Service', 'Pod', 'Namespace', 'Pod IP', 'Status')
 	Write-Host ($fmt -f '-------', '---', '---------', '------', '------')
@@ -415,7 +464,7 @@ function Do-Shutdown {
 	else { Write-Host "No kind containers found for '$KindClusterName'." }
 }
 
-function Do-Cleanup {
+function Do-Delete {
 	Progress "Cleaning up kind cluster and artifacts..."
 
 	# Stop any running containers for the cluster
@@ -458,10 +507,53 @@ function Do-Cleanup {
 }
 function Do-Startup {
 	if ($KindClusters -contains $KindClusterName)
-    {
-		Success "kind cluster '$KindClusterName' is running ..."
-    }
-    else
+	{
+		# Check whether the control-plane container is running; if stopped, start it instead of recreating the cluster
+		$controlPlaneName = "$KindClusterName-control-plane"
+		$runningContainer = (& docker ps --filter "name=$controlPlaneName" --format "{{.Names}}") 2>$null
+		if (-not [string]::IsNullOrEmpty($runningContainer)) {
+			Success "kind cluster '$KindClusterName' is running ..."
+		}
+		else {
+			Write-Host "kind cluster '$KindClusterName' exists but control-plane container is STOPPED." -ForegroundColor Yellow
+			Progress "Starting existing kind control-plane container..."
+			try {
+				& docker start $controlPlaneName | Out-Null
+				# start any other stopped cluster containers matching the cluster name
+				$allContainers = (& docker ps -a --filter "name=$KindClusterName" --format "{{.Names}}") 2>$null
+				foreach ($c in $allContainers) {
+					if ($c -ne $controlPlaneName) { & docker start $c | Out-Null }
+				}
+			} catch {
+				Write-Host "Failed to start kind containers: $_" -ForegroundColor Red
+			}
+
+			# Wait for Kubernetes API to become responsive
+			function Test-KubeApiAvailable {
+				param([string]$Context, [int]$TimeoutSeconds = 60)
+				$deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+				while ((Get-Date) -lt $deadline) {
+					try {
+						& kubectl get ns --context $Context 2>$null | Out-Null
+						if ($LASTEXITCODE -eq 0) { return $true }
+					} catch {}
+					Start-Sleep -Seconds 2
+				}
+				return $false
+			}
+
+			if (-not (Test-KubeApiAvailable -Context "kind-$KindClusterName" -TimeoutSeconds 60)) {
+				Write-Host "Kubernetes API did not become available after starting containers; attempt cluster recreate." -ForegroundColor Yellow
+				& kind delete cluster --name $KindClusterName
+				Start-Sleep -Seconds 3
+				# fall through to create the cluster below
+			} else {
+				Success "kind cluster '$KindClusterName' started and API is available."
+				return
+			}
+		}
+	}
+	else
     {
 		Progress "kind cluster '$KindClusterName' not running ... creating ..."
         
@@ -471,6 +563,45 @@ function Do-Startup {
             if (-not (Test-Path $KindConfigFile)) {
                 throw "kind-config.yaml not found in repository. Add a preconfigured kind-config.yaml to the repo root before running this script."
             }
+
+	    # Check that kind-config.yaml hostPort mappings align with HOST_HTTP_PORT / HOST_HTTPS_PORT
+	    function Get-KindHostPortForContainerPort {
+	        param([string]$FilePath, [int]$ContainerPort)
+	        try {
+	            $lines = Get-Content -Path $FilePath -ErrorAction Stop
+	        } catch { return $null }
+	        for ($i = 0; $i -lt $lines.Count; $i++) {
+	            if ($lines[$i] -match "containerPort:\s*${ContainerPort}\b") {
+	                for ($j = 1; $j -le 6; $j++) {
+	                    if ($i + $j -lt $lines.Count) {
+	                        if ($lines[$i + $j] -match "hostPort:\s*(\d+)") {
+	                            return [int]$matches[1]
+	                        }
+	                    }
+	                }
+	            }
+	        }
+	        return $null
+	    }
+
+	    function Check-KindConfigPorts {
+	        param([string]$FilePath, [int]$ExpectedHttpPort, [int]$ExpectedHttpsPort)
+	        $hp80 = Get-KindHostPortForContainerPort -FilePath $FilePath -ContainerPort 80
+	        $hp443 = Get-KindHostPortForContainerPort -FilePath $FilePath -ContainerPort 443
+	        if ($hp80 -and $hp80 -ne $ExpectedHttpPort) {
+	            Write-Host "Warning: kind-config.yaml maps containerPort 80 to hostPort $hp80, but HOST_HTTP_PORT is $ExpectedHttpPort." -ForegroundColor Yellow
+	            Write-Host "  Suggestion: update kind-config.yaml extraPortMappings hostPort for containerPort 80 or set HOST_HTTP_PORT in fortify.config to match." -ForegroundColor Yellow
+	        }
+	        if ($hp443 -and $hp443 -ne $ExpectedHttpsPort) {
+	            Write-Host "Warning: kind-config.yaml maps containerPort 443 to hostPort $hp443, but HOST_HTTPS_PORT is $ExpectedHttpsPort." -ForegroundColor Yellow
+	            Write-Host "  Suggestion: update kind-config.yaml extraPortMappings hostPort for containerPort 443 or set HOST_HTTPS_PORT in fortify.config to match." -ForegroundColor Yellow
+	        }
+	        if (($hp80 -and $hp80 -lt 1024) -or ($hp443 -and $hp443 -lt 1024)) {
+	            Write-Host "Note: mapping host ports <1024 may require elevated privileges when creating the kind cluster." -ForegroundColor Yellow
+	        }
+	    }
+
+	    Check-KindConfigPorts -FilePath $KindConfigFile -ExpectedHttpPort $HostHttpPort -ExpectedHttpsPort $HostHttpsPort
         
         & kind create cluster --name $KindClusterName --config $KindConfigFile
         
@@ -605,6 +736,101 @@ DNS.5 = $SCDASTAPIUrl
 		Set-Location $PSScriptRoot
 	}
 
+		# Auto-detect: ensure cluster wildcard-certificate matches local certificate.pem
+		function Get-CertSha256FromPemFile {
+			param([string]$Path)
+			if (-not (Test-Path $Path)) { return $null }
+			$txt = Get-Content -Raw -Path $Path
+			if ($txt -match '(?s)-----BEGIN CERTIFICATE-----(.*)-----END CERTIFICATE-----') {
+				$inner = $matches[1] -replace '\s+',''
+				try { $bytes = [Convert]::FromBase64String($inner) } catch { return $null }
+				$sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+				return ([System.BitConverter]::ToString($sha)).Replace('-','').ToLower()
+			}
+			return $null
+		}
+
+		function Get-CertSha256FromSecret {
+			param([string]$SecretName)
+			try {
+				$val = & kubectl get secret $SecretName -o jsonpath='{.data.tls\.crt}' 2>$null
+			} catch { $val = $null }
+			if (-not $val -or $val -eq '') { return $null }
+			try { $bytes = [Convert]::FromBase64String($val) } catch { return $null }
+			$sha = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+			return ([System.BitConverter]::ToString($sha)).Replace('-','').ToLower()
+		}
+
+		function Sync-WildcardCertificateAndSscSecretIfNeeded {
+			param([string]$CertDir)
+			$localPem = Join-Path $CertDir 'certificate.pem'
+			$localKey = Join-Path $CertDir 'key.pem'
+			$localHash = Get-CertSha256FromPemFile -Path $localPem
+			$secretHash = Get-CertSha256FromSecret -SecretName 'wildcard-certificate'
+			if (-not $localHash) { Write-Host 'No local certificate.pem found to compare.'; return }
+			if ($localHash -ne $secretHash) {
+				Write-Host 'Wildcard certificate in cluster differs from local certificate.pem — updating cluster secret...' -ForegroundColor Yellow
+				& kubectl delete secret wildcard-certificate --ignore-not-found
+				& kubectl create secret tls wildcard-certificate --cert=$localPem --key=$localKey
+				# Recreate SSC secret only if both keystore and truststore exist
+				$ks = Join-Path $CertDir 'ssc-service.jks'
+				$trust = Join-Path $CertDir 'truststore'
+				if (-not (Test-Path $ks) -or -not (Test-Path $trust)) {
+					Write-Host 'Keystore or truststore missing; skipping SSC secret recreation to avoid creating incomplete secret.' -ForegroundColor Yellow
+				} else {
+					$SSCSecretDir = Join-Path $PSScriptRoot -ChildPath 'ssc-secret'
+					if ((Test-Path -PathType Container $SSCSecretDir)) { Remove-Item -LiteralPath $SSCSecretDir -Force -Recurse }
+					New-Item -ItemType Directory -Path $SSCSecretDir | Out-Null
+					Copy-Item -Path (Join-Path $PSScriptRoot 'ssc.autoconfig') -Destination $SSCSecretDir -Force
+					Copy-Item -Path (Join-Path $PSScriptRoot 'fortify.license') -Destination $SSCSecretDir -Force
+					Copy-Item -Path $ks -Destination $SSCSecretDir -Force
+					Copy-Item -Path $trust -Destination $SSCSecretDir -Force
+					& kubectl delete secret ssc --ignore-not-found
+					& kubectl create secret generic ssc --from-file=$SSCSecretDir --from-literal=ssc-service.jks.password=changeit --from-literal=ssc-service.jks.key.password=changeit --from-literal=truststore.password=changeit
+					# restart the pod to pick up changes
+					& kubectl delete pod ssc-webapp-0 --ignore-not-found
+				}
+			} else {
+				Write-Host 'Wildcard certificate in cluster matches local certificate.pem.' -ForegroundColor Green
+			}
+		}
+
+		# Run auto-detect sync on startup only if user opted in via -AutoSyncCerts
+		if ($AutoSyncCerts) {
+			Sync-WildcardCertificateAndSscSecretIfNeeded -CertDir $CertDir
+		} else {
+			Write-Host 'Certificate auto-sync is disabled. Use -AutoSyncCerts to enable.' -ForegroundColor Cyan
+		}
+
+		# If user requested certificate recreation, refresh the SSC secret so the webapp picks up new keystore/truststore
+		if ($RecreateCertificates) {
+			Write-Host "Recreating SSC secret from updated certificates..."
+			$SSCSecretDir = Join-Path $PSScriptRoot -ChildPath "ssc-secret"
+			if ((Test-Path -PathType Container $SSCSecretDir)) { Remove-Item -LiteralPath $SSCSecretDir -Force -Recurse }
+			New-Item -ItemType Directory -Path $SSCSecretDir | Out-Null
+
+			# Copy required secret files
+			Copy-Item -Path (Join-Path $PSScriptRoot 'ssc.autoconfig') -Destination $SSCSecretDir -Force
+			Copy-Item -Path (Join-Path $PSScriptRoot 'fortify.license') -Destination $SSCSecretDir -Force
+			Copy-Item -Path (Join-Path $CertDir 'ssc-service.jks') -Destination $SSCSecretDir -Force
+			Copy-Item -Path (Join-Path $CertDir 'truststore') -Destination $SSCSecretDir -Force
+
+			# Recreate Kubernetes secret and restart the webapp pod to pick up new files
+			& kubectl delete secret ssc --ignore-not-found
+			& kubectl create secret generic ssc `
+				--from-file=$SSCSecretDir `
+				--from-literal=ssc-service.jks.password=changeit `
+				--from-literal=ssc-service.jks.key.password=changeit `
+				--from-literal=truststore.password=changeit
+
+			# If SSC is already running, delete the pod so it restarts with new secret
+			$sscPod = & kubectl get pods --no-headers -o custom-columns=":metadata.name" 2>$null | Select-String '^ssc-webapp-0$'  
+			if ($sscPod) { & kubectl delete pod ssc-webapp-0 --ignore-not-found }
+		}
+
+	# Add Bitnami repo for MySQL and PostgreSQL charts
+	& helm repo add bitnami https://charts.bitnami.com/bitnami 2>$null
+
 	# run update to prevent spurious errors
 	helm repo update
 
@@ -708,20 +934,36 @@ DNS.5 = $SCDASTAPIUrl
 		}
 		else
 		{
-			# check if MySql is already running
-			$MySqlStatus = Get-PodStatus -PodName mysql-0
-			if ($MysqlStatus -eq "Running")
+			# check if a database is already running (MySQL or MSSQL)
+			$DbStatus = Get-PodStatus -PodName mysql-0
+			if ($DbStatus -ne "Running") { $DbStatus = Get-PodStatus -PodName mssql-0 }
+			if ($DbStatus -eq "Running")
 			{
-				Write-Host "MySQL is already running ..."
+				Write-Host "Database is already running ..."
 			}
 			else
 			{
-				Write-Host "Installing MySql ..."
+				Write-Host "Installing database (MSSQL preferred) ..."
 				$MySqlValues = Join-Path $ValuesDir -ChildPath "mysql-values.yaml"
-				& helm install mysql bitnami/mysql -f $MySqlValues --version $MYSQL_HELM_VERSION
+				$MssqlValues = Join-Path $ValuesDir -ChildPath "mssql-values.yaml"
+				# Prefer a local Microsoft SQL Server chart if present, then local MySQL chart, otherwise use Bitnami
+				$LocalChartMssql = Join-Path $PSScriptRoot 'charts\mssql-official'
+				$LocalChart = Join-Path $PSScriptRoot 'charts\mysql-official'
+				if (Test-Path $LocalChartMssql) {
+					& helm upgrade --install mssql $LocalChartMssql -f $MssqlValues
+					$dbPodName = 'mssql-0'
+				}
+				elseif (Test-Path $LocalChart) {
+					& helm upgrade --install mysql $LocalChart -f $MySqlValues
+					$dbPodName = 'mysql-0'
+				}
+				else {
+					& helm install mysql bitnami/mysql -f $MySqlValues --version $MYSQL_HELM_VERSION
+					$dbPodName = 'mysql-0'
+				}
 				Start-Sleep -Seconds 30
 				Write-Host
-				$MySqlStatus = Wait-UntilPodStatus -PodName mysql-0
+				$MySqlStatus = Wait-UntilPodStatus -PodName $dbPodName
 			}
 
 			Write-Host "Installing SSC ..."
@@ -997,25 +1239,10 @@ DNS.5 = $SCDASTAPIUrl
 }
 
 # If user requested status or shutdown, perform those and exit
-if ($Status) {
-	Show-Status
-	return
-}
-
-if ($Startup) {
-	Do-Startup
-	return
-}
-
-if ($Shutdown) {
-	Do-Shutdown
-	return
-}
-
-if ($Cleanup) {
-	Do-Cleanup
-	return
-}
+if ($Status) {Show-Status; return}
+if ($Start) { Do-Startup; return }
+if ($Stop)  { Do-Shutdown; return }
+if ($Delete) { Do-Delete; return }
 
 Show-Help
 exit 0

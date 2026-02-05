@@ -1,0 +1,32 @@
+image:
+  repository: mcr.microsoft.com/mssql/server
+  tag: 2019-latest
+
+saPassword: "ChangeMe123!"
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+
+service:
+  type: ClusterIP
+  port: 1433
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Init job configuration to create the SSC database automatically
+init:
+  enabled: true
+  image:
+    repository: mcr.microsoft.com/mssql-tools
+    tag: latest
+  database: ssc_db
+  # Secret name that contains sa-password (defaults to the chart secret)
+  secretName: ""

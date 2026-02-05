@@ -1,0 +1,16 @@
+image:
+  repository: docker.io/mysql
+  tag: "8.0.45"
+  pullPolicy: IfNotPresent
+
+auth:
+  rootPassword: "password"
+  database: "ssc_db"
+
+replicaCount: 1
+
+persistence:
+  enabled: true
+  size: 8Gi
+
+resources: {}

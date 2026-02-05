@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mysql-official
+description: "Simple MySQL Helm chart using the official MySQL image (for demo)"
+type: application
+version: 0.1.0
+appVersion: "8.0.45"

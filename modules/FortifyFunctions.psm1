@@ -147,7 +147,7 @@ function Install-ScanCentralClient
 {
     param (
         [Parameter(Mandatory=$false)]
-        [String]$Version = "23.1.0",
+        [String]$Version = "25.4.0",
         [Parameter(Mandatory=$false)]
         [String]$InstallDir = "scancentral-client",
         [Parameter(Mandatory=$true)]
@@ -195,3 +195,49 @@ function New-FortifyToken
     }
 }
 Export-ModuleMember New-FortifyToken
+
+function Wait-ForSSCReady
+{
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$PodName = 'ssc-webapp-0',
+        [Parameter(Mandatory=$false)]
+        [string]$ProbeUrl = 'https://localhost:8443/',
+        [Parameter(Mandatory=$false)]
+        [string]$HostHeader = 'ssc.127-0-0-1.nip.io',
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 600,
+        [Parameter(Mandatory=$false)]
+        [int]$PollIntervalSeconds = 5
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    Write-Host "Waiting for pod $PodName to be Running and ready (timeout ${TimeoutSeconds}s) ..."
+
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $ready = kubectl get pod $PodName -o jsonpath='{.status.containerStatuses[0].ready}' 2>$null
+        } catch { $ready = $null }
+        if ($ready -eq 'true') { break }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    if ((Get-Date) -ge $deadline) { throw "Timed out waiting for pod $PodName to be ready" }
+
+    Write-Host "Pod $PodName reports container ready. Probing HTTP(s) endpoint $ProbeUrl ..."
+    # Probe loop
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $headers = @{ Host = $HostHeader }
+            # Use -SkipCertificateCheck for local certs
+            $resp = Invoke-WebRequest -Uri $ProbeUrl -Headers $headers -Method Head -UseBasicParsing -SkipCertificateCheck -TimeoutSec 10 -ErrorAction Stop
+            if ($resp.StatusCode -eq 200) { Write-Host "SSC is available (HTTP 200)." -ForegroundColor Green; return $true }
+        } catch {
+            # swallow and retry
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    throw "Timed out waiting for SSC HTTP endpoint to return 200"
+}
+Export-ModuleMember -Function Wait-ForSSCReady

@@ -1,0 +1,13 @@
+saPassword: "ChangeMe123!"
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+
+image:
+  repository: mcr.microsoft.com/mssql/server
+  tag: 2019-latest
+
+service:
+  port: 1433
